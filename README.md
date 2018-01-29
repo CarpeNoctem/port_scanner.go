@@ -1,5 +1,5 @@
 # port_scanner.go
-Like port_scanner.py, but in Go (golang).
+Like [port_scanner.py](https://github.com/CarpeNoctem/port_scanner.py), but written in Go (golang).
 
 Very simple TCP connect (not SYN) port scanner.
 Uses goroutines to add both concurrency and parallelism on machines with multiple CPUs/cores.
