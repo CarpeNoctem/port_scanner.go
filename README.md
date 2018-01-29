@@ -10,9 +10,9 @@ hiro@macbook-pro:~$ ./port_scanner -h
 Usage: ./port_scanner [options] hostname [low_port] [high_port]
 Will scan nmap's top 100 ports if no low or high port are given.
   -c int
-        maximum number of CPU cores to spread the work across (default 4)
+        maximum number of CPU cores to spread the work across (default: <number of available CPU cores>)
   -n int
-        number of goroutines to use (default 4)
+        number of goroutines to use (default: <number of available CPU cores>)
   -t duration
         connection timeout (default 200ms)
   -v	print closed port reasons and open port banners
