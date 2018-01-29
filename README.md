@@ -6,7 +6,7 @@ Uses goroutines to add both concurrency and parallelism on machines with multipl
 
 ```
 CarpeNoctem@github:~$ go build port_scanner.go 
-hiro@macbook-pro:~$ ./port_scanner -h
+CarpeNoctem@github:~$ ./port_scanner -h
 Usage: ./port_scanner [options] hostname [low_port] [high_port]
 Will scan nmap's top 100 ports if no low or high port are given.
   -c int
