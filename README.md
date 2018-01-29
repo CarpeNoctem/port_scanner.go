@@ -1,2 +1,2 @@
-# port_scanner_go
+# port_scanner.go
 Like port_scanner.py, but in Go (golang).
