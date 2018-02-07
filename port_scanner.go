@@ -14,114 +14,82 @@ import (
 var timeout = time.Millisecond * 200
 var maxprocs = runtime.NumCPU()
 var threads = maxprocs
-var host, low_port, high_port string
+var host string
+var low_port, high_port int
 var verbose = false
+var range_supplied = false
 var top_100 = [100]string{"7", "9", "13", "21", "22", "23", "25", "26", "37", "53", "79", "80", "81", "88", "106", "110", "111", "113", "119", "135", "139", "143", "144", "179", "199", "389", "427", "443", "444", "445", "465", "513", "514", "515", "543", "544", "548", "554", "587", "631", "646", "873", "990", "993", "995", "1025", "1026", "1027", "1028", "1029", "1110", "1433", "1720", "1723", "1755", "1900", "2000", "2001", "2049", "2121", "2717", "3000", "3128", "3306", "3389", "3986", "4899", "5000", "5009", "5051", "5060", "5101", "5190", "5357", "5432", "5631", "5666", "5800", "5900", "6000", "6001", "6646", "7070", "8000", "8008", "8009", "8080", "8081", "8443", "8888", "9100", "9999", "10000", "32768", "49152", "49153", "49154", "49155", "49156", "49157"}
 
 func main() {
-	parse_args()
-	IPs, _ := net.LookupHost(host)
-	if len(IPs) < 1 {
-		fmt.Fprintln(os.Stderr, "Invalid host specified:", host)
-		return
-	} else if verbose {
-		fmt.Printf("Host %s has the following IP addresses:\n %v\n", host, IPs)
-	}
-	runtime.GOMAXPROCS(maxprocs)
-	var open_ports []string
-
 	start := time.Now()
 
-	// If no port range is specified, scan nmap's top 100.
-	// If only a single port is given, just scan that one.
-	// If both a low and high port are given, scan that range.
-	if low_port == "" {
-		open_ports = distribute_work(0, len(top_100), scan_slice_of_ports)
-	} else if high_port == "" {
-		fmt.Printf("Scanning port %v on %s\n\n", low_port, host)
-		if is_tcp_port_open(host, low_port) {
-			open_ports = []string{low_port}
-		} else {
-			fmt.Printf("closed: %s:%s\n", host, low_port)
-		}
-	} else {
-		low, eLow := strconv.ParseInt(low_port, 10, 32)
-		high, eHigh := strconv.ParseInt(high_port, 10, 32)
-		if eLow != nil || eHigh != nil || low > high {
-			fmt.Fprintln(os.Stderr, "Invalid port argument(s) for range. Must be numeric.")
-			return
-		}
-		open_ports = distribute_work(int(low), int(high), scan_range_of_ports)
+	to_scan_ch := make(chan string, threads + 1)
+	open_ch := make(chan string, threads + 1)
+	closed_ch := make(chan string, threads + 1)
+	total_ports := 100
+
+	for i := 0; i < threads; i++ {
+		go scanner(to_scan_ch, open_ch, closed_ch)
 	}
 
-	for _, port := range open_ports {
-		fmt.Printf("OPEN: %s:%s\n", host, port)
+	if range_supplied {
+		total_ports = high_port - low_port + 1
+		go add_port_range(to_scan_ch)
+	} else {
+		go add_top_100(to_scan_ch)
+	}
+	fmt.Printf("Scanning %d ports on %s, with %d threads across %d CPU cores...\n\n", total_ports, host, threads, maxprocs)
+
+	// Wait and print results of all the ports we're scanning.
+	for i := 0; i < total_ports; i++ {
+		select {
+		case open_msg := <-open_ch:
+			fmt.Printf("OPEN: %s\n", open_msg)
+		case closed_msg := <-closed_ch:
+			if verbose {
+				fmt.Printf("closed: %s\n", closed_msg)
+			}
+		}
 	}
 	fmt.Println("\nScan completed in", time.Since(start))
 }
 
-func distribute_work(min, max int, check_func func(open_ch chan []string, lower, upper int)) (open_ports []string) {
-	if threads > max-min+1 {
-		threads = max - min + 1
+func add_top_100(to_scan_ch chan<- string) {
+	for _, port := range top_100 {
+		to_scan_ch <- net.JoinHostPort(host, port)
 	}
-	fmt.Printf("Scanning %d ports on %s, with %d threads across %d CPU cores...\n\n", max-min+1, host, threads, maxprocs)
-	open_ch := make(chan []string, threads)
-	high := min - 1
-	for i := 0; i < threads; i++ {
-		low := high + 1
-		high = min + (i+1)*(max-min)/threads
-		go check_func(open_ch, low, high)
-	}
-	for i := 0; i < threads; i++ {
-		result := <-open_ch
-		open_ports = append(open_ports, result...)
-	}
-	return open_ports
+	close(to_scan_ch)
 }
 
-func scan_slice_of_ports(open_ch chan []string, lower, upper int) {
-	if upper < len(top_100) {
-		upper = upper + 1
+func add_port_range(to_scan_ch chan<- string) {
+	for port := low_port; port <= high_port; port++ {
+		to_scan_ch <- net.JoinHostPort(host, strconv.Itoa(port))
 	}
-	ports := top_100[lower:upper]
-	var open []string
-	for _, port := range ports {
-		if is_tcp_port_open(host, port) {
-			open = append(open, port)
+	close(to_scan_ch)
+}
+
+func scanner(ports_ch <-chan string, open_ch, closed_ch chan<- string) {
+	for hostport := range ports_ch {
+		conn, err := net.DialTimeout("tcp", hostport, timeout)
+		if err != nil {
+			closed_ch <- err.Error()
+		} else {
+			if verbose {
+				conn.SetReadDeadline(time.Now().Add(timeout))
+				banner, err := bufio.NewReader(conn).ReadString('\n')
+				if err == nil {
+					hostport = fmt.Sprintf("%s: Banner: %s", hostport, banner)
+				} else {
+					hostport = fmt.Sprintf("%s: No banner returned: %s", hostport, err.Error())
+				}
+			}
+			conn.Close()
+			open_ch <- hostport
 		}
 	}
-	open_ch <- open
 }
 
-func scan_range_of_ports(open_ch chan []string, lower, upper int) {
-	var open []string
-	for port := lower; port <= upper; port++ {
-		port_s := strconv.Itoa(port)
-		if is_tcp_port_open(host, port_s) {
-			open = append(open, port_s)
-		}
-	}
-	open_ch <- open
-}
-
-// port can be numeric or a service name. e.g. http, ssh, etc.
-func is_tcp_port_open(host, port string) bool {
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort(host, port), timeout)
-	if err != nil {
-		if verbose {
-			fmt.Println("-", err)
-		}
-		return false
-	}
-	defer conn.Close()
-	if verbose {
-		banner, err := bufio.NewReader(conn).ReadString('\n')
-		fmt.Printf("- Port %s open: %s %v\n", port, banner, err)
-	}
-	return true
-}
-
-func parse_args() {
+func init() {
 	flag.Usage = usage
 
 	flag.IntVar(&threads, "n", threads, "number of goroutines to use")
@@ -132,8 +100,31 @@ func parse_args() {
 	flag.Parse()
 
 	host = flag.Arg(0)
-	low_port = flag.Arg(1)
-	high_port = flag.Arg(2)
+	IPs, _ := net.LookupHost(host)
+	if len(IPs) < 1 {
+		fmt.Fprintln(os.Stderr, "Invalid host specified:", host)
+		os.Exit(1)
+	} else if verbose {
+		fmt.Printf("Host %s has the following IP addresses:\n %v\n", host, IPs)
+	}
+
+	if flag.NArg() > 1 {
+		low_arg, eLow := strconv.ParseInt(flag.Arg(1), 10, 32)
+		high_arg, eHigh := strconv.ParseInt(flag.Arg(2), 10, 32)
+		if eLow != nil || (flag.NArg() > 2 && eHigh != nil) {
+			fmt.Fprintln(os.Stderr, "Invalid port argument(s) for range. Must be numeric.")
+			os.Exit(1)
+		}
+		if high_arg < low_arg {
+			high_arg = low_arg
+		}
+		low_port = int(low_arg)
+		high_port = int(high_arg)
+		range_supplied = true
+	}
+	
+
+	runtime.GOMAXPROCS(maxprocs)
 }
 
 func usage() {
