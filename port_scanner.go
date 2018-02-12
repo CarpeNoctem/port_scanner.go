@@ -16,9 +16,12 @@ var maxprocs = runtime.NumCPU()
 var threads = maxprocs
 var host string
 var low_port, high_port int
+var low_octet = 1
+var high_octet = 1
 var verbose = false
 var range_supplied = false
 var top_100 = [100]string{"7", "9", "13", "21", "22", "23", "25", "26", "37", "53", "79", "80", "81", "88", "106", "110", "111", "113", "119", "135", "139", "143", "144", "179", "199", "389", "427", "443", "444", "445", "465", "513", "514", "515", "543", "544", "548", "554", "587", "631", "646", "873", "990", "993", "995", "1025", "1026", "1027", "1028", "1029", "1110", "1433", "1720", "1723", "1755", "1900", "2000", "2001", "2049", "2121", "2717", "3000", "3128", "3306", "3389", "3986", "4899", "5000", "5009", "5051", "5060", "5101", "5190", "5357", "5432", "5631", "5666", "5800", "5900", "6000", "6001", "6646", "7070", "8000", "8008", "8009", "8080", "8081", "8443", "8888", "9100", "9999", "10000", "32768", "49152", "49153", "49154", "49155", "49156", "49157"}
+type add_work func(chan<- string, string)
 
 func main() {
 	start := time.Now()
@@ -34,9 +37,19 @@ func main() {
 
 	if range_supplied {
 		total_ports = high_port - low_port + 1
-		go add_port_range(to_scan_ch)
+		if low_octet == high_octet {
+			go add_port_range(to_scan_ch, host)
+		} else {
+			total_ports = total_ports * (high_octet - low_octet + 1)
+			go add_host_range(to_scan_ch, host, add_port_range)
+		}
 	} else {
-		go add_top_100(to_scan_ch)
+		if low_octet == high_octet {
+			go add_top_100(to_scan_ch, host)
+		} else {
+			total_ports = total_ports * (high_octet - low_octet + 1)
+			go add_host_range(to_scan_ch, host, add_top_100)
+		}
 	}
 	fmt.Printf("Scanning %d ports on %s, with %d threads across %d CPU cores...\n\n", total_ports, host, threads, maxprocs)
 
@@ -54,22 +67,36 @@ func main() {
 	fmt.Println("\nScan completed in", time.Since(start))
 }
 
-func add_top_100(to_scan_ch chan<- string) {
-	for _, port := range top_100 {
-		to_scan_ch <- net.JoinHostPort(host, port)
+func add_host_range(to_scan_ch chan<- string, hostbase string, fn add_work) {
+	for last_octet := low_octet; last_octet <= high_octet; last_octet++ {
+		fn(to_scan_ch, fmt.Sprintf("%s.%d", hostbase, last_octet))
 	}
 	close(to_scan_ch)
 }
 
-func add_port_range(to_scan_ch chan<- string) {
+func add_top_100(to_scan_ch chan<- string, host string) {
+	for _, port := range top_100 {
+		to_scan_ch <- net.JoinHostPort(host, port)
+	}
+	if low_octet == high_octet {
+		close(to_scan_ch)
+	}
+}
+
+func add_port_range(to_scan_ch chan<- string, host string) {
 	for port := low_port; port <= high_port; port++ {
 		to_scan_ch <- net.JoinHostPort(host, strconv.Itoa(port))
 	}
-	close(to_scan_ch)
+	if low_octet == high_octet {
+		close(to_scan_ch)
+	}
 }
 
 func scanner(ports_ch <-chan string, open_ch, closed_ch chan<- string) {
 	for hostport := range ports_ch {
+		if verbose {
+			fmt.Printf("Checking hostport: %s\n", hostport)
+		}
 		conn, err := net.DialTimeout("tcp", hostport, timeout)
 		if err != nil {
 			closed_ch <- err.Error()
@@ -96,12 +123,14 @@ func init() {
 	flag.IntVar(&maxprocs, "c", maxprocs, "maximum number of CPU cores to spread the work across")
 	flag.DurationVar(&timeout, "t", timeout, "connection timeout")
 	flag.BoolVar(&verbose, "v", verbose, "print closed port reasons and open port banners")
+	flag.IntVar(&low_octet, "lo", low_octet, "scan a range of hosts, starting with this low last octet")
+	flag.IntVar(&high_octet, "ho", high_octet, "scan a range of hosts, ending with this high last octet")
 
 	flag.Parse()
 
 	host = flag.Arg(0)
 	IPs, _ := net.LookupHost(host)
-	if len(IPs) < 1 {
+	if len(IPs) < 1 && low_octet == high_octet {
 		fmt.Fprintln(os.Stderr, "Invalid host specified:", host)
 		os.Exit(1)
 	} else if verbose {
@@ -122,7 +151,6 @@ func init() {
 		high_port = int(high_arg)
 		range_supplied = true
 	}
-	
 
 	runtime.GOMAXPROCS(maxprocs)
 }
